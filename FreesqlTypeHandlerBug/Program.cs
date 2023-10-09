@@ -1,5 +1,5 @@
-﻿using FreeSql;
-using FreeSql.DataAnnotations;
+﻿#define SQLITE
+using FreeSql;
 using FreeSql.Sqlite;
 
 using Serilog;
@@ -8,6 +8,8 @@ using Serilog.Sinks.SystemConsole.Themes;
 using System;
 using System.Linq;
 using System.Threading.Tasks;
+
+using static FreeSql.Internal.GlobalFilter;
 
 namespace FreesqlTypeHandlerBug
 {
@@ -18,15 +20,24 @@ namespace FreesqlTypeHandlerBug
             Log.Logger = new LoggerConfiguration()
                 .Enrich.FromLogContext()
                 .MinimumLevel.Verbose()
-                .WriteTo.Console(outputTemplate: "[{Timestamp:HH:mm:ss}] [{@Level:u3}] {Message:lj}{NewLine}{Exception}", theme:AnsiConsoleTheme.Sixteen)
-                .WriteTo.File( "Logs/.log", rollingInterval: RollingInterval.Day)
+                .WriteTo.Console(outputTemplate: "[{Timestamp:HH:mm:ss}] [{@Level:u3}] {Message:lj}{NewLine}{Exception}", theme: AnsiConsoleTheme.Sixteen)
+                .WriteTo.File("Logs/.log", rollingInterval: RollingInterval.Day)
                 .CreateLogger();
 
-            FreeSql.Internal.Utils.TypeHandlers.TryAdd(typeof(DateTime), new DateTimeTicksHandler());
-
+            //此编译符号在项目文件.csproj中设置
+#if DateTimeTicksHandler
+            FreeSql.Internal.Utils.TypeHandlers.TryAdd(typeof(DateTime), new DateTimeTicksHandler());//抛出异常
+#else
+            FreeSql.Internal.Utils.TypeHandlers.TryAdd(typeof(DateTime), new DateTimeMillisecondsHandler());
+#endif
             IFreeSql fsql = new FreeSqlBuilder()
-                .UseConnectionString(DataType.Sqlite, "Data Source=test.db", typeof(SqliteProvider<>))
+#if SQLITE
+                .UseConnectionString(DataType.Sqlite, "Data Source=TypeHandlerTest.db", typeof(SqliteProvider<>))
+#else
+                .UseConnectionString(DataType.SqlServer, "Server=.;Database=TypeHandlerTest;Trusted_Connection=True;TrustServerCertificate=True;Encrypt=False")
+#endif
                 .UseAutoSyncStructure(true)
+                .UseNoneCommandParameter(true)
                 .Build();
 
             fsql.Aop.CurdBefore+=Aop_CurdBefore;
@@ -34,20 +45,26 @@ namespace FreesqlTypeHandlerBug
             Random random = new Random(Guid.NewGuid().GetHashCode());
             fsql.Delete<TestEntity>().Where(_ => true).ExecuteAffrows();
 
-            TestEntity[] entities = Enumerable.Range(1, 10).Select(x => new TestEntity
+            TestEntity[] entities = Enumerable.Range(1, 5).Select(x => new TestEntity
             {
                 Id = x,
                 CreateTime = DateTime.Now,
-                UpdateTime = DateTime.Now
             }).ToArray();
 
             fsql.Insert<TestEntity>().AppendData(entities).ExecuteAffrows();
 
+
+            //直接读表查看数据
+            var list = fsql.Select<object>().AsTable((_, _) => nameof(TestEntity)).ToList();
+            list.ForEach(x => Log.Information("{@item}", x));
+
+
             /// 此处不论是否使用异步
             /// 都无法按照预期进入<see cref="DateTimeTicksHandler.Deserialize(object)"/>方法
-            /// var list = fsql.Select<TestEntity>().ToList();
-            var list = await fsql.Select<TestEntity>().ToListAsync();
-            Log.Information("查库:{@list}", list);
+            /// var list2 = fsql.Select<TestEntity>().ToList();
+            /// var list2 = fsql.Select<object>().AsType(typeof(TestEntity)).ToList();
+            var list2 = await fsql.Select<TestEntity>().ToListAsync();
+            list2.ForEach(x => Log.Information("{@item}", x));
 
         }
 
